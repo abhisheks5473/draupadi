@@ -21,6 +21,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -35,6 +36,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.draupadi.app.data.Contact
 import com.draupadi.app.data.Prefs
+import kotlinx.coroutines.delay
 
 @Composable
 fun SettingsScreen(
@@ -46,6 +48,9 @@ fun SettingsScreen(
     heard: String,
     locationStatus: String,
     locationAlways: Boolean,
+    locationSummary: String,
+    locationAt: Long,
+    locationOn: Boolean,
     onFixLocation: () -> Unit,
     onTestSos: () -> Unit,
     onBack: () -> Unit,
@@ -64,6 +69,15 @@ fun SettingsScreen(
     var record by remember { mutableStateOf(prefs.autoRecord) }
     var sens by remember { mutableStateOf(prefs.shakeSensitivity) }
     val context = LocalContext.current
+
+    // ticks so the "x seconds ago" below stays honest
+    var now by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            now = System.currentTimeMillis()
+            delay(1000)
+        }
+    }
 
     val picker = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -239,6 +253,23 @@ fun SettingsScreen(
         }
         Gap(6)
         LevelBar(shakeLevel, if (shakeFlash) Safe else Red)
+
+        Gap(18)
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("Location", color = Ink, fontSize = 14.5.sp, modifier = Modifier.weight(1f))
+            Text(
+                if (!locationOn) "phone location is off"
+                else if (locationAt == 0L) "waiting for a fix" else "live",
+                color = if (locationOn && locationAt > 0L) Safe else Warn,
+                fontSize = 12.5.sp
+            )
+        }
+        Gap(6)
+        Text(
+            if (locationSummary.isBlank()) "No position yet — step outside or switch location on."
+            else "$locationSummary · ${((now - locationAt) / 1000).coerceAtLeast(0)} s ago",
+            color = Ink3, fontSize = 12.5.sp
+        )
 
         Gap(18)
         SoftButton("Run a test SOS (sends nothing)", tint = Ink) { onTestSos() }

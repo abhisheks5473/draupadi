@@ -76,6 +76,12 @@ object AppState {
     val shakeDetected = MutableStateFlow(0L)
 
     val heard = MutableStateFlow("")
+
+    /** Where the phone last knew it was, and when — shown in the self-test so
+     *  "is location working?" can be answered before it matters. */
+    val locationSummary = MutableStateFlow("")
+    val locationAt = MutableStateFlow(0L)
+    val locationOn = MutableStateFlow(true)
     val cloudStatus = MutableStateFlow("")
 
     const val UNLOCK_AT = 3

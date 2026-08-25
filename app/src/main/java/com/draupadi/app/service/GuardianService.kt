@@ -38,6 +38,7 @@ import com.draupadi.app.core.AppState
 import com.draupadi.app.core.Buzz
 import com.draupadi.app.core.Geo
 import com.draupadi.app.core.IncomingUi
+import com.draupadi.app.core.Locator
 import com.draupadi.app.core.ResultUi
 import com.draupadi.app.core.ShakeDetector
 import com.draupadi.app.core.ShakeSensitivity
@@ -78,6 +79,11 @@ class GuardianService : LifecycleService() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var sensors: SensorManager? = null
     private var shake: ShakeDetector? = null
+    private var locator: Locator? = null
+
+    /** Set when the first alert text had to go out without coordinates, so the
+     *  moment a fix lands a corrected one follows straight away. */
+    private var locationTextOwed = false
 
     private val main = Handler(Looper.getMainLooper())
     private val restartListening = Runnable { beginRecognition() }
@@ -103,6 +109,7 @@ class GuardianService : LifecycleService() {
                 latitude = prefs.lastLat
                 longitude = prefs.lastLng
             }
+            AppState.locationSummary.value = Locator.describe(lastLocation)
         }
 
         createChannels()
@@ -169,6 +176,7 @@ class GuardianService : LifecycleService() {
             fused?.removeLocationUpdates(locationCallback)
         } catch (_: Throwable) {
         }
+        locator?.stop()
         try {
             unregisterReceiver(smsResult)
         } catch (_: Throwable) {
@@ -472,20 +480,44 @@ class GuardianService : LifecycleService() {
 
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(result: LocationResult) {
-            val loc = result.lastLocation ?: return
-            lastLocation = loc
-            prefs.lastLat = loc.latitude
-            prefs.lastLng = loc.longitude
-            if (AppState.alert.value.active) {
-                AppState.alert.value = AppState.alert.value.copy(locationFixed = true)
-                if (!AppState.alert.value.dryRun) {
-                    lifecycleScope.launch {
-                        Cloud.pushPrecise(alertId, loc.latitude, loc.longitude, loc.accuracy)
-                    }
-                }
-            } else {
-                lifecycleScope.launch { Cloud.heartbeat(loc.latitude, loc.longitude, prefs.name) }
+            result.lastLocation?.let { onFix(it) }
+        }
+    }
+
+    /**
+     * Every fix from every provider lands here. Google's fused provider and
+     * the framework's own GPS and network providers all feed this, so if one
+     * goes quiet the others still answer the only question that matters.
+     */
+    private fun onFix(loc: Location) {
+        if (!Locator.isBetterFix(loc, lastLocation)) return
+        lastLocation = loc
+        prefs.lastLat = loc.latitude
+        prefs.lastLng = loc.longitude
+        AppState.locationSummary.value = Locator.describe(loc)
+        AppState.locationAt.value = System.currentTimeMillis()
+
+        val a = AppState.alert.value
+        if (a.active) {
+            AppState.alert.value = a.copy(locationFixed = true)
+
+            // the first text went out before there was anything to send —
+            // correct it now rather than at the two-minute mark
+            if (locationTextOwed && !a.dryRun) {
+                locationTextOwed = false
+                Messenger.sendTo(
+                    this,
+                    Messenger.numbersOf(prefs.contacts, prefs.policeNumber),
+                    Messenger.alertText(prefs.name, Geo.mapsLink(loc.latitude, loc.longitude))
+                )
             }
+            if (!a.dryRun) {
+                lifecycleScope.launch {
+                    Cloud.pushPrecise(alertId, loc.latitude, loc.longitude, loc.accuracy)
+                }
+            }
+        } else {
+            lifecycleScope.launch { Cloud.heartbeat(loc.latitude, loc.longitude, prefs.name) }
         }
     }
 
@@ -509,8 +541,13 @@ class GuardianService : LifecycleService() {
                 .build()
             fused?.requestLocationUpdates(req, locationCallback, Looper.getMainLooper())
         } catch (t: Throwable) {
-            Log.w(TAG, "location unavailable: ${t.message}")
+            Log.w(TAG, "fused location unavailable: ${t.message}")
         }
+
+        // and the framework's own providers, which need no Play Services
+        val l = locator ?: Locator(this) { fix -> onFix(fix) }.also { locator = it }
+        l.start(fast = false)
+        AppState.locationOn.value = l.anyProviderEnabled()
     }
 
     private fun sharpenLocation() {
@@ -522,6 +559,9 @@ class GuardianService : LifecycleService() {
             fused?.requestLocationUpdates(req, locationCallback, Looper.getMainLooper())
         } catch (_: Throwable) {
         }
+        val l = locator ?: Locator(this) { fix -> onFix(fix) }.also { locator = it }
+        l.start(fast = true)
+        AppState.locationOn.value = l.anyProviderEnabled()
     }
 
     // ---------------------------------------------------------- sms result
@@ -569,8 +609,9 @@ class GuardianService : LifecycleService() {
         //    the other side: no app, no data, no account
         if (!dryRun) {
             val loc = lastLocation
+            locationTextOwed = loc == null
             val link = if (loc != null) Geo.mapsLink(loc.latitude, loc.longitude)
-            else "GPS still locking on"
+            else "locating now, an updated link follows in seconds"
             val handed = Messenger.sendTo(this, numbers, Messenger.alertText(prefs.name, link), tracked = true)
             AppState.alert.value = AppState.alert.value.copy(
                 smsTotal = numbers.size,

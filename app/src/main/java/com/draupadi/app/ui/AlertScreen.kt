@@ -41,6 +41,7 @@ fun AlertScreen(
     state: AlertUi,
     cloudOn: Boolean,
     policeNumber: String,
+    locationSummary: String,
     onSafe: () -> Unit,
     onCancel: () -> Unit,
     onCall: () -> Unit
@@ -131,8 +132,9 @@ fun AlertScreen(
             )
             StatusLine(
                 done = state.locationFixed,
-                text = if (state.locationFixed) "Live location is being shared"
-                else "Getting a GPS fix…"
+                text = if (state.locationFixed)
+                    "Location shared" + (if (locationSummary.isNotBlank()) " · $locationSummary" else "")
+                else "Getting a fix — an updated link follows automatically"
             )
             if (cloudOn && !state.dryRun) {
                 StatusLine(

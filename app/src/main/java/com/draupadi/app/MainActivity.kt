@@ -125,6 +125,9 @@ class MainActivity : ComponentActivity() {
                 val shakeAt by AppState.shakeDetected.collectAsState()
                 val heard by AppState.heard.collectAsState()
                 val cloudStatus by AppState.cloudStatus.collectAsState()
+                val locationSummary by AppState.locationSummary.collectAsState()
+                val locationAt by AppState.locationAt.collectAsState()
+                val locationOn by AppState.locationOn.collectAsState()
 
                 var settingsOpen by remember { mutableStateOf(false) }
                 var setupDone by remember { mutableStateOf(prefs.setupDone) }
@@ -174,6 +177,7 @@ class MainActivity : ComponentActivity() {
                         state = alert,
                         cloudOn = Cloud.enabled,
                         policeNumber = prefs.policeNumber,
+                        locationSummary = locationSummary,
                         onSafe = { GuardianService.send(activity, GuardianService.ACTION_SAFE) },
                         onCancel = { GuardianService.send(activity, GuardianService.ACTION_CANCEL) },
                         onCall = { callPolice() }
@@ -200,6 +204,9 @@ class MainActivity : ComponentActivity() {
                         heard = heard,
                         locationStatus = locationStatusText(),
                         locationAlways = alwaysLocation,
+                        locationSummary = locationSummary,
+                        locationAt = locationAt,
+                        locationOn = locationOn,
                         onFixLocation = { fixLocation() },
                         onTestSos = {
                             settingsOpen = false
