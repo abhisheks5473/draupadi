@@ -27,6 +27,8 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
+import java.util.concurrent.Future
+import java.util.concurrent.TimeUnit
 
 /**
  * Records video with sound straight into MediaStore.
@@ -67,17 +69,39 @@ class EvidenceRecorder(
             onSaved(null)
             return
         }
-        val future = ProcessCameraProvider.getInstance(context)
-        future.addListener({
-            try {
-                val p = future.get()
-                provider = p
-                bindAndRecord(p, useFrontCamera, onSaved)
+        // ProcessCameraProvider.getInstance() is declared as returning a Guava
+        // ListenableFuture. Guava reaches the finished APK through Firebase, but
+        // Gradle resolves the standalone artifact to the deliberately empty
+        // "9999.0-empty-to-avoid-conflict-with-guava" stub, so the type is not
+        // usable at compile time. At runtime it is an ordinary
+        // java.util.concurrent.Future, which is all this needs — so we take it
+        // as one and keep Guava out of the build entirely.
+        exec.execute {
+            val ready: ProcessCameraProvider? = try {
+                val getInstance = ProcessCameraProvider::class.java
+                    .getMethod("getInstance", Context::class.java)
+                val future = getInstance.invoke(null, context) as Future<*>
+                future.get(8, TimeUnit.SECONDS) as ProcessCameraProvider
             } catch (t: Throwable) {
                 Log.e(TAG, "camera unavailable: ${t.message}")
-                onSaved(null)
+                null
             }
-        }, ContextCompat.getMainExecutor(context))
+
+            // binding must happen on the main thread
+            ContextCompat.getMainExecutor(context).execute {
+                if (ready == null) {
+                    onSaved(null)
+                } else {
+                    try {
+                        provider = ready
+                        bindAndRecord(ready, useFrontCamera, onSaved)
+                    } catch (t: Throwable) {
+                        Log.e(TAG, "could not start the camera: ${t.message}")
+                        onSaved(null)
+                    }
+                }
+            }
+        }
     }
 
     private fun bindAndRecord(
