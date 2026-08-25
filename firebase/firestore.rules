@@ -1,0 +1,62 @@
+rules_version = '2';
+
+// The consent gate lives here, not in the app.
+//
+// An app can be decompiled and a request can be forged, so "only show the
+// exact location after three people accept" is worth nothing if the app is
+// the thing enforcing it. These rules make the *server* refuse to hand over
+// a woman's precise position until three verified accounts have committed
+// to come — no client can talk its way past that.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function alertOf(alertId) {
+      return get(/databases/$(database)/documents/alerts/$(alertId)).data;
+    }
+
+    match /users/{uid} {
+      // any signed-in phone may be discovered by an alert nearby
+      allow read: if signedIn();
+      allow write: if signedIn() && request.auth.uid == uid;
+
+      match /inbox/{alertId} {
+        allow read, delete: if signedIn() && request.auth.uid == uid;
+        // someone raising an alert may drop exactly one message per alert
+        allow create: if signedIn();
+        allow update: if false;
+      }
+    }
+
+    match /alerts/{alertId} {
+      allow read: if signedIn();
+      allow create: if signedIn() && request.resource.data.ownerUid == request.auth.uid;
+
+      // the owner can change anything; a responder may only bump the counter
+      allow update: if signedIn() && (
+        resource.data.ownerUid == request.auth.uid ||
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['acceptedCount'])
+      );
+      allow delete: if false;
+
+      match /responders/{uid} {
+        allow read: if signedIn();
+        allow create: if signedIn() && request.auth.uid == uid;
+        allow update, delete: if false;
+      }
+
+      // ---- the gate ----
+      match /precise/{doc} {
+        allow read: if signedIn() && (
+          alertOf(alertId).ownerUid == request.auth.uid ||
+          alertOf(alertId).acceptedCount >= 3
+        );
+        allow write: if signedIn() && alertOf(alertId).ownerUid == request.auth.uid;
+      }
+    }
+  }
+}

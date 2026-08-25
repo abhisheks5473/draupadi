@@ -1,0 +1,2 @@
+-keep class com.draupadi.app.** { *; }
+-dontwarn com.google.firebase.**

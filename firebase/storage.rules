@@ -1,0 +1,14 @@
+rules_version = '2';
+
+// Evidence. Written by the phone in trouble, readable by signed-in accounts
+// so the footage survives the phone. Tighten the read rule to the owner and
+// the police account before this is ever used for real.
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /alerts/{alertId}/{file=**} {
+      allow write: if request.auth != null;
+      allow read: if request.auth != null;
+    }
+  }
+}
