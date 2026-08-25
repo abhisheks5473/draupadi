@@ -73,6 +73,12 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:$camerax")
     implementation("androidx.camera:camera-video:$camerax")
 
+    // CameraX hands back a Guava ListenableFuture. Firebase drags in the
+    // "listenablefuture:9999.0-empty-to-avoid-conflict-with-guava" stub — an
+    // intentionally empty jar — so without real Guava on our own compile
+    // classpath the type exists but has no class behind it.
+    implementation("com.google.guava:guava:33.3.1-android")
+
     implementation("com.google.android.gms:play-services-location:21.3.0")
 
     val firebaseBom = platform("com.google.firebase:firebase-bom:33.3.0")
