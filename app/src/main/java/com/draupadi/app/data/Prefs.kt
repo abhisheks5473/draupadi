@@ -52,6 +52,11 @@ class Prefs(context: Context) {
         get() = sp.getBoolean(K_SHAKE, true)
         set(v) = sp.edit().putBoolean(K_SHAKE, v).apply()
 
+    /** Camera and microphone start the instant an alert fires. */
+    var autoRecord: Boolean
+        get() = sp.getBoolean(K_RECORD, true)
+        set(v) = sp.edit().putBoolean(K_RECORD, v).apply()
+
     /** Off by default: a blaring alarm also ruins the evidence audio. */
     var loudSiren: Boolean
         get() = sp.getBoolean(K_SIREN, false)
@@ -92,6 +97,7 @@ class Prefs(context: Context) {
         const val K_SHAKE = "shake_on"
         const val K_SILENT = "silent_on"
         const val K_SIREN = "loud_siren"
+        const val K_RECORD = "auto_record"
         const val K_RESPOND = "respond_on"
         const val K_CONTACTS = "contacts"
     }

@@ -57,6 +57,7 @@ fun SettingsScreen(
     var silent by remember { mutableStateOf(prefs.silentOn) }
     var respond by remember { mutableStateOf(prefs.respondOn) }
     var siren by remember { mutableStateOf(prefs.loudSiren) }
+    var record by remember { mutableStateOf(prefs.autoRecord) }
     val context = LocalContext.current
 
     val picker = rememberLauncherForActivityResult(
@@ -143,6 +144,9 @@ fun SettingsScreen(
         }
         Toggle("Silent alerts", "No siren, no bright screen. For a club or a cab", silent) {
             silent = it; prefs.silentOn = it
+        }
+        Toggle("Record on alert", "Camera and microphone start the instant an alert fires", record) {
+            record = it; prefs.autoRecord = it
         }
         Toggle("Loud siren", "Sounds the alarm tone during an alert. Off by default — it also drowns out the recording", siren) {
             siren = it; prefs.loudSiren = it
