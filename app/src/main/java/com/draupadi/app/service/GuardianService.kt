@@ -40,6 +40,7 @@ import com.draupadi.app.core.Geo
 import com.draupadi.app.core.IncomingUi
 import com.draupadi.app.core.ResultUi
 import com.draupadi.app.core.ShakeDetector
+import com.draupadi.app.core.ShakeSensitivity
 import com.draupadi.app.data.Prefs
 import com.draupadi.app.net.Cloud
 import com.draupadi.app.receiver.ActionReceiver
@@ -95,6 +96,15 @@ class GuardianService : LifecycleService() {
     override fun onCreate() {
         super.onCreate()
         prefs = Prefs(this)
+
+        // an alert must never have to say "no location yet"
+        if (prefs.hasLastLocation) {
+            lastLocation = Location("saved").apply {
+                latitude = prefs.lastLat
+                longitude = prefs.lastLng
+            }
+        }
+
         createChannels()
         goForeground()
 
@@ -121,6 +131,7 @@ class GuardianService : LifecycleService() {
 
         startLocation()
         applySettings()
+        main.post(shakeMeter)
 
         AppState.guardianRunning.value = true
     }
@@ -148,6 +159,7 @@ class GuardianService : LifecycleService() {
 
     override fun onDestroy() {
         AppState.guardianRunning.value = false
+        main.removeCallbacks(shakeMeter)
         stopListening()
         stopShake()
         alertJob?.cancel()
@@ -175,6 +187,7 @@ class GuardianService : LifecycleService() {
     private fun applySettings() {
         if (prefs.guardianOn && prefs.voiceOn) startListening() else stopListening()
         if (prefs.guardianOn && prefs.shakeOn) startShake() else stopShake()
+        startLocation()
         if (prefs.guardianOn && prefs.respondOn) {
             lifecycleScope.launch { startInbox() }
         } else {
@@ -426,28 +439,27 @@ class GuardianService : LifecycleService() {
 
     // ------------------------------------------------------------- shaking
 
+    /** Feeds the live bar on the self-test screen. One instance, started once. */
+    private val shakeMeter = object : Runnable {
+        override fun run() {
+            AppState.shakeLevel.value = shake?.level ?: 0f
+            main.postDelayed(this, 100)
+        }
+    }
+
     private fun startShake() {
-        if (shake != null) return
+        stopShake()
         sensors = getSystemService(Context.SENSOR_SERVICE) as? SensorManager
         val accel = sensors?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) ?: run {
-            Log.w(TAG, "no accelerometer")
+            Log.w(TAG, "no accelerometer on this phone")
             return
         }
-        val d = ShakeDetector {
+        val d = ShakeDetector(ShakeSensitivity.of(prefs.shakeSensitivity)) {
             AppState.shakeDetected.value = System.currentTimeMillis()
             if (!AppState.alert.value.active) triggerAlert("shake", prefs.silentOn, false)
         }
         shake = d
         sensors?.registerListener(d, accel, SensorManager.SENSOR_DELAY_GAME)
-
-        // keep the meter fed for the self-test screen
-        main.post(object : Runnable {
-            override fun run() {
-                val s = shake ?: return
-                AppState.shakeLevel.value = s.level
-                main.postDelayed(this, 90)
-            }
-        })
     }
 
     private fun stopShake() {
@@ -462,6 +474,8 @@ class GuardianService : LifecycleService() {
         override fun onLocationResult(result: LocationResult) {
             val loc = result.lastLocation ?: return
             lastLocation = loc
+            prefs.lastLat = loc.latitude
+            prefs.lastLng = loc.longitude
             if (AppState.alert.value.active) {
                 AppState.alert.value = AppState.alert.value.copy(locationFixed = true)
                 if (!AppState.alert.value.dryRun) {
@@ -480,9 +494,18 @@ class GuardianService : LifecycleService() {
             !has(Manifest.permission.ACCESS_COARSE_LOCATION)
         ) return
         try {
-            fused?.lastLocation?.addOnSuccessListener { it?.let { l -> lastLocation = l } }
-            val req = LocationRequest.Builder(Priority.PRIORITY_BALANCED_POWER_ACCURACY, 60_000L)
-                .setMinUpdateIntervalMillis(20_000L)
+            fused?.lastLocation?.addOnSuccessListener {
+                it?.let { l ->
+                    lastLocation = l
+                    prefs.lastLat = l.latitude
+                    prefs.lastLng = l.longitude
+                }
+            }
+            // always on: the position is kept current in the background so an
+            // alert never has to wait for a first fix
+            val req = LocationRequest.Builder(Priority.PRIORITY_BALANCED_POWER_ACCURACY, 30_000L)
+                .setMinUpdateIntervalMillis(10_000L)
+                .setWaitForAccurateLocation(false)
                 .build()
             fused?.requestLocationUpdates(req, locationCallback, Looper.getMainLooper())
         } catch (t: Throwable) {

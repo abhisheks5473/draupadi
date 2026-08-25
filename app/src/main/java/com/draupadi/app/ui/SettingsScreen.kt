@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -43,6 +44,9 @@ fun SettingsScreen(
     shakeLevel: Float,
     shakeFlash: Boolean,
     heard: String,
+    locationStatus: String,
+    locationAlways: Boolean,
+    onFixLocation: () -> Unit,
     onTestSos: () -> Unit,
     onBack: () -> Unit,
     onChanged: () -> Unit
@@ -58,6 +62,7 @@ fun SettingsScreen(
     var respond by remember { mutableStateOf(prefs.respondOn) }
     var siren by remember { mutableStateOf(prefs.loudSiren) }
     var record by remember { mutableStateOf(prefs.autoRecord) }
+    var sens by remember { mutableStateOf(prefs.shakeSensitivity) }
     val context = LocalContext.current
 
     val picker = rememberLauncherForActivityResult(
@@ -139,8 +144,20 @@ fun SettingsScreen(
         Toggle("Listen for my safe word", "Uses on-device recognition where the phone supports it", voice) {
             voice = it; prefs.voiceOn = it; onChanged()
         }
-        Toggle("Shake to trigger", "Four hard shakes", shake) {
+        Toggle("Shake to trigger", "Shake the phone hard for about a second", shake) {
             shake = it; prefs.shakeOn = it; onChanged()
+        }
+        if (shake) {
+            Gap(2)
+            Choice(listOf("Firm shake", "Normal", "Light shake"), sens) {
+                sens = it; prefs.shakeSensitivity = it; onChanged()
+            }
+            Gap(6)
+            Text(
+                "Firm is hardest to set off by accident. Try each one against the live bar below.",
+                color = Ink3, fontSize = 12.5.sp, lineHeight = 18.sp
+            )
+            Gap(10)
         }
         Toggle("Silent alerts", "No siren, no bright screen. For a club or a cab", silent) {
             silent = it; prefs.silentOn = it
@@ -154,6 +171,41 @@ fun SettingsScreen(
         Toggle("Answer other people's alerts", "Your phone buzzes when someone nearby is in trouble", respond) {
             respond = it; prefs.respondOn = it; onChanged()
         }
+
+        Gap(26)
+        Label("location")
+        Gap(8)
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Access", color = Ink, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                Text(
+                    locationStatus,
+                    color = if (locationAlways) Safe else Warn,
+                    fontSize = 12.5.sp
+                )
+            }
+            if (!locationAlways) {
+                RowGap(12)
+                Box(
+                    Modifier
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Red)
+                        .clickableText { onFixLocation() }
+                        .padding(horizontal = 20.dp, vertical = 11.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text("Fix", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+        Gap(8)
+        Text(
+            if (locationAlways)
+                "Your position is kept current in the background, so an alert never has to wait for a first GPS fix."
+            else
+                "Set location to “Allow all the time”. Android will not let the app share where you are once the screen is off otherwise — and that is exactly when it matters.",
+            color = Ink3, fontSize = 12.5.sp, lineHeight = 18.sp
+        )
 
         Gap(26)
         Label("check it works")

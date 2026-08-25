@@ -11,12 +11,42 @@ import kotlin.math.sqrt
  * Shake-to-trigger.
  *
  * The naive version — "is total acceleration above X" — fails, because the
- * reading always carries gravity, so the bar ends up either impossible to reach
- * or tripped by walking. This measures acceleration *away from* gravity and
- * asks for a sustained burst: several strong samples inside about a second.
- * A deliberate shake clears it easily; a stumble, a pocket, or a bus does not.
+ * reading always carries gravity, so the bar ends up either impossible to
+ * reach or tripped by walking. This measures acceleration *away from* gravity
+ * and asks for a sustained burst: several strong samples inside about a
+ * second.
+ *
+ * Sensitivity is a setting rather than a constant, because what counts as a
+ * deliberate shake depends on the phone, the case and the person holding it.
  */
-class ShakeDetector(private val onShake: () -> Unit) : SensorEventListener {
+enum class ShakeSensitivity(
+    val label: String,
+    val threshold: Double,   // m/s² beyond gravity
+    val needed: Int,         // strong samples…
+    val windowMs: Long       // …inside this window
+) {
+    /** Hardest to set off. A hard, deliberate shake for about a second. */
+    LOW("Firm shake", 17.0, 11, 1500L),
+
+    /** Default. A clear shake, but not a wrestle. */
+    MEDIUM("Normal", 13.5, 8, 1300L),
+
+    /** Easiest. Use only if the other two will not fire on your phone. */
+    HIGH("Light shake", 10.5, 6, 1100L);
+
+    companion object {
+        fun of(index: Int): ShakeSensitivity = when (index) {
+            0 -> LOW
+            2 -> HIGH
+            else -> MEDIUM
+        }
+    }
+}
+
+class ShakeDetector(
+    private var sensitivity: ShakeSensitivity = ShakeSensitivity.LOW,
+    private val onShake: () -> Unit
+) : SensorEventListener {
 
     /** 0..1, for the live meter on the self-test screen. */
     @Volatile
@@ -29,6 +59,11 @@ class ShakeDetector(private val onShake: () -> Unit) : SensorEventListener {
     private val hits = ArrayDeque<Long>()
     private var lastFire = 0L
 
+    fun setSensitivity(s: ShakeSensitivity) {
+        sensitivity = s
+        hits.clear()
+    }
+
     override fun onSensorChanged(event: SensorEvent?) {
         if (event == null || event.sensor.type != Sensor.TYPE_ACCELEROMETER) return
 
@@ -37,19 +72,21 @@ class ShakeDetector(private val onShake: () -> Unit) : SensorEventListener {
         val z = event.values[2]
         val force = abs(sqrt((x * x + y * y + z * z).toDouble()) - SensorManager.GRAVITY_EARTH)
 
-        // decay so the meter falls back instead of sticking at its peak
-        level = maxOf((force / 18.0).coerceIn(0.0, 1.0).toFloat(), level * 0.82f)
+        // the meter is scaled against the current threshold, so "full bar"
+        // always means "this would count", whatever the setting
+        val scaled = force / (sensitivity.threshold * 1.35)
+        level = maxOf(scaled.coerceIn(0.0, 1.0).toFloat(), level * 0.82f)
 
         if (!armed) return
 
         val now = System.currentTimeMillis()
         if (now - lastFire < COOLDOWN_MS) return
-        if (force < THRESHOLD) return
+        if (force < sensitivity.threshold) return
 
         hits.addLast(now)
-        while (hits.isNotEmpty() && now - hits.first() > WINDOW_MS) hits.removeFirst()
+        while (hits.isNotEmpty() && now - hits.first() > sensitivity.windowMs) hits.removeFirst()
 
-        if (hits.size >= NEEDED) {
+        if (hits.size >= sensitivity.needed) {
             hits.clear()
             lastFire = now
             onShake()
@@ -64,9 +101,6 @@ class ShakeDetector(private val onShake: () -> Unit) : SensorEventListener {
     }
 
     private companion object {
-        const val THRESHOLD = 10.5      // m/s² beyond gravity
-        const val NEEDED = 6            // strong samples…
-        const val WINDOW_MS = 1100L     // …inside this window
-        const val COOLDOWN_MS = 6000L
+        const val COOLDOWN_MS = 8000L
     }
 }

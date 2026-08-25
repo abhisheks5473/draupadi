@@ -48,6 +48,7 @@ class MainActivity : ComponentActivity() {
     }.toTypedArray()
 
     private var granted by mutableStateOf(false)
+    private var alwaysLocation by mutableStateOf(false)
 
     private val askCore =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
@@ -65,12 +66,51 @@ class MainActivity : ComponentActivity() {
         ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
     }
 
+    private fun has(p: String) =
+        ContextCompat.checkSelfPermission(this, p) == PackageManager.PERMISSION_GRANTED
+
+    /** "Allow all the time" — without it Android stops sharing the position
+     *  the moment the screen goes off, which is exactly when it matters. */
+    private fun hasAlwaysLocation(): Boolean =
+        if (Build.VERSION.SDK_INT >= 29) {
+            has(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+        } else {
+            has(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+
+    private fun locationStatusText(): String = when {
+        !has(Manifest.permission.ACCESS_FINE_LOCATION) &&
+            !has(Manifest.permission.ACCESS_COARSE_LOCATION) ->
+            "Off — nobody can be sent to you"
+        !hasAlwaysLocation() -> "Only while the app is open"
+        else -> "Allow all the time — always on"
+    }
+
+    /** Android 11 and newer will not grant background location from a dialog;
+     *  it has to be chosen in the app's own settings page. */
+    private fun fixLocation() {
+        if (Build.VERSION.SDK_INT == 29) {
+            askBackground.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+            return
+        }
+        try {
+            startActivity(
+                Intent(
+                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.fromParts("package", packageName, null)
+                )
+            )
+        } catch (_: Throwable) {
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, true)
         prefs = Prefs(this)
         Cloud.init(this)
         granted = hasCore()
+        alwaysLocation = hasAlwaysLocation()
         if (prefs.setupDone && prefs.guardianOn) startGuardian()
 
         val activity = this
@@ -158,6 +198,9 @@ class MainActivity : ComponentActivity() {
                         shakeLevel = shakeLevel,
                         shakeFlash = shakeFlash,
                         heard = heard,
+                        locationStatus = locationStatusText(),
+                        locationAlways = alwaysLocation,
+                        onFixLocation = { fixLocation() },
                         onTestSos = {
                             settingsOpen = false
                             GuardianService.send(
@@ -198,6 +241,11 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         granted = hasCore()
+        alwaysLocation = hasAlwaysLocation()
+        // a permission change made in Settings needs the service to notice
+        if (prefs.setupDone && prefs.guardianOn) {
+            GuardianService.send(this, GuardianService.ACTION_REFRESH)
+        }
     }
 
     private fun startGuardian() {

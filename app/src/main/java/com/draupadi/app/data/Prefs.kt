@@ -52,6 +52,26 @@ class Prefs(context: Context) {
         get() = sp.getBoolean(K_SHAKE, true)
         set(v) = sp.edit().putBoolean(K_SHAKE, v).apply()
 
+    /** 0 = firm shake (hardest), 1 = normal, 2 = light shake (easiest). */
+    var shakeSensitivity: Int
+        get() = sp.getInt(K_SHAKE_LEVEL, 0)
+        set(v) = sp.edit().putInt(K_SHAKE_LEVEL, v.coerceIn(0, 2)).apply()
+
+    /**
+     * The last position the phone knew about, kept across restarts so an alert
+     * always has something to send even before GPS has a fresh fix.
+     */
+    var lastLat: Double
+        get() = (sp.getString(K_LAT, "") ?: "").toDoubleOrNull() ?: 0.0
+        set(v) = sp.edit().putString(K_LAT, v.toString()).apply()
+
+    var lastLng: Double
+        get() = (sp.getString(K_LNG, "") ?: "").toDoubleOrNull() ?: 0.0
+        set(v) = sp.edit().putString(K_LNG, v.toString()).apply()
+
+    val hasLastLocation: Boolean
+        get() = lastLat != 0.0 || lastLng != 0.0
+
     /** Camera and microphone start the instant an alert fires. */
     var autoRecord: Boolean
         get() = sp.getBoolean(K_RECORD, true)
@@ -98,6 +118,9 @@ class Prefs(context: Context) {
         const val K_SILENT = "silent_on"
         const val K_SIREN = "loud_siren"
         const val K_RECORD = "auto_record"
+        const val K_SHAKE_LEVEL = "shake_level"
+        const val K_LAT = "last_lat"
+        const val K_LNG = "last_lng"
         const val K_RESPOND = "respond_on"
         const val K_CONTACTS = "contacts"
     }

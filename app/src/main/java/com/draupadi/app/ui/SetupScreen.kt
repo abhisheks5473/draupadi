@@ -151,7 +151,7 @@ fun SetupScreen(
                 BigTitle("Let Draupadi\ndo its job")
                 Gap(12)
                 Text(
-                    "It needs the microphone to hear your word, the camera to record what happens, your location to send help, and permission to text — all granted once, now, so nothing is ever asked of you mid-emergency.",
+                    "It needs the microphone to hear your word, the camera to record what happens, your location to send help, and permission to text — all granted once, now, so nothing is ever asked of you mid-emergency.\n\nWhen Android asks about location, choose \u201CAllow all the time\u201D. Anything less and it stops sharing where you are the moment the screen goes off.",
                     color = Ink2, fontSize = 15.sp, lineHeight = 22.sp
                 )
                 Gap(24)

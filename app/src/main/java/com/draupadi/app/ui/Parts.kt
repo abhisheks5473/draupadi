@@ -283,3 +283,30 @@ fun LevelBar(level: Float, tint: Color, height: Dp = 6.dp) {
         )
     }
 }
+
+/** A small three-way chooser. Used for shake sensitivity, where the right
+ *  setting depends on the phone and can only really be found by trying. */
+@Composable
+fun Choice(options: List<String>, selected: Int, onSelect: (Int) -> Unit) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        options.forEachIndexed { i, label ->
+            val on = i == selected
+            Box(
+                Modifier
+                    .weight(1f)
+                    .height(42.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(if (on) Red else Color.White.copy(alpha = 0.06f))
+                    .pointerInput(label) { detectTapGestures(onTap = { onSelect(i) }) },
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    label,
+                    color = if (on) Color.White else Ink2,
+                    fontSize = 13.sp,
+                    fontWeight = if (on) FontWeight.Bold else FontWeight.Medium
+                )
+            }
+        }
+    }
+}
