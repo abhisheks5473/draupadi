@@ -7,9 +7,11 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -18,15 +20,18 @@ import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import com.draupadi.app.core.AppState
+import com.draupadi.app.core.ResultUi
 import com.draupadi.app.data.Prefs
+import com.draupadi.app.net.Cloud
 import com.draupadi.app.service.GuardianService
 import com.draupadi.app.ui.AlertScreen
 import com.draupadi.app.ui.DraupadiTheme
 import com.draupadi.app.ui.HomeScreen
 import com.draupadi.app.ui.IncomingScreen
+import com.draupadi.app.ui.ResultScreen
 import com.draupadi.app.ui.SettingsScreen
 import com.draupadi.app.ui.SetupScreen
-import com.draupadi.app.net.Cloud
+import kotlinx.coroutines.delay
 
 class MainActivity : ComponentActivity() {
 
@@ -73,12 +78,37 @@ class MainActivity : ComponentActivity() {
             DraupadiTheme {
                 val alert by AppState.alert.collectAsState()
                 val incoming by AppState.incoming.collectAsState()
+                val result by AppState.result.collectAsState()
                 val listening by AppState.listening.collectAsState()
+                val micLevel by AppState.micLevel.collectAsState()
+                val shakeLevel by AppState.shakeLevel.collectAsState()
+                val shakeAt by AppState.shakeDetected.collectAsState()
+                val heard by AppState.heard.collectAsState()
                 val cloudStatus by AppState.cloudStatus.collectAsState()
+
                 var settingsOpen by remember { mutableStateOf(false) }
                 var setupDone by remember { mutableStateOf(prefs.setupDone) }
                 var contacts by remember { mutableStateOf(prefs.contacts) }
                 var word by remember { mutableStateOf(prefs.safeWord) }
+                var guardianOn by remember { mutableStateOf(prefs.guardianOn) }
+                var shakeFlash by remember { mutableStateOf(false) }
+
+                // the screen must not sleep while help is on its way
+                LaunchedEffect(alert.active) {
+                    if (alert.active) {
+                        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    } else {
+                        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    }
+                }
+
+                LaunchedEffect(shakeAt) {
+                    if (shakeAt > 0L) {
+                        shakeFlash = true
+                        delay(2200)
+                        shakeFlash = false
+                    }
+                }
 
                 when {
                     !setupDone -> SetupScreen(
@@ -105,6 +135,7 @@ class MainActivity : ComponentActivity() {
                         cloudOn = Cloud.enabled,
                         policeNumber = prefs.policeNumber,
                         onSafe = { GuardianService.send(activity, GuardianService.ACTION_SAFE) },
+                        onCancel = { GuardianService.send(activity, GuardianService.ACTION_CANCEL) },
                         onCall = { callPolice() }
                     )
 
@@ -115,20 +146,47 @@ class MainActivity : ComponentActivity() {
                         onNavigate = { openMaps(incoming.lat, incoming.lng) }
                     )
 
+                    result.show -> ResultScreen(
+                        state = result,
+                        onDone = { AppState.result.value = ResultUi() }
+                    )
+
                     settingsOpen -> SettingsScreen(
                         prefs = prefs,
                         cloudStatus = cloudStatus,
-                        onBack = { settingsOpen = false; word = prefs.safeWord },
-                        onChanged = { restartGuardian() }
+                        micLevel = micLevel,
+                        shakeLevel = shakeLevel,
+                        shakeFlash = shakeFlash,
+                        heard = heard,
+                        onTestSos = {
+                            settingsOpen = false
+                            GuardianService.send(
+                                activity, GuardianService.ACTION_SOS,
+                                trigger = "test", silent = false, dryRun = true
+                            )
+                        },
+                        onBack = {
+                            settingsOpen = false
+                            word = prefs.safeWord
+                            guardianOn = prefs.guardianOn
+                        },
+                        onChanged = {
+                            guardianOn = prefs.guardianOn
+                            refreshGuardian()
+                        }
                     )
 
                     else -> HomeScreen(
                         safeWord = word,
                         listening = listening,
-                        guardianOn = prefs.guardianOn,
+                        guardianOn = guardianOn,
+                        micLevel = micLevel,
                         onSos = {
                             if (!granted) askCore.launch(core)
-                            else GuardianService.send(activity, GuardianService.ACTION_SOS, "button", prefs.silentOn)
+                            else GuardianService.send(
+                                activity, GuardianService.ACTION_SOS,
+                                trigger = "button", silent = prefs.silentOn
+                            )
                         },
                         onSettings = { settingsOpen = true }
                     )
@@ -150,10 +208,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun restartGuardian() {
+    /** Settings take effect immediately rather than after a reboot. */
+    private fun refreshGuardian() {
         try {
             if (prefs.guardianOn) {
                 startGuardian()
+                GuardianService.send(this, GuardianService.ACTION_REFRESH)
             } else {
                 GuardianService.send(this, GuardianService.ACTION_STOP)
             }

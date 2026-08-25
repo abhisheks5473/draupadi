@@ -18,9 +18,22 @@ android {
         vectorDrawables { useSupportLibrary = true }
     }
 
+    // AGP turns the old JAR signature off whenever minSdk is 24 or higher, which
+    // leaves a v2-only APK. That is valid, but a handful of OEM installers still
+    // refuse it and say nothing more useful than "App not installed", so all
+    // three schemes are switched on.
+    signingConfigs {
+        getByName("debug") {
+            enableV1Signing = true
+            enableV2Signing = true
+            enableV3Signing = true
+        }
+    }
+
     buildTypes {
         debug {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("debug")
         }
         release {
             // The CI workflow builds the debug variant so the APK is installable

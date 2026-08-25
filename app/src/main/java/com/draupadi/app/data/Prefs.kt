@@ -52,6 +52,11 @@ class Prefs(context: Context) {
         get() = sp.getBoolean(K_SHAKE, true)
         set(v) = sp.edit().putBoolean(K_SHAKE, v).apply()
 
+    /** Off by default: a blaring alarm also ruins the evidence audio. */
+    var loudSiren: Boolean
+        get() = sp.getBoolean(K_SIREN, false)
+        set(v) = sp.edit().putBoolean(K_SIREN, v).apply()
+
     /** Silent mode: no siren, no screen change. For a club or a cab. */
     var silentOn: Boolean
         get() = sp.getBoolean(K_SILENT, false)
@@ -86,6 +91,7 @@ class Prefs(context: Context) {
         const val K_VOICE = "voice_on"
         const val K_SHAKE = "shake_on"
         const val K_SILENT = "silent_on"
+        const val K_SIREN = "loud_siren"
         const val K_RESPOND = "respond_on"
         const val K_CONTACTS = "contacts"
     }

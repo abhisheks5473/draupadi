@@ -1,18 +1,21 @@
 package com.draupadi.app.service
 
 import android.Manifest
+import android.app.Activity
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.hardware.Sensor
-import android.hardware.SensorEvent
-import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.location.Location
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -29,12 +32,17 @@ import androidx.lifecycle.LifecycleService
 import androidx.lifecycle.lifecycleScope
 import com.draupadi.app.MainActivity
 import com.draupadi.app.R
+import com.draupadi.app.core.Alarm
 import com.draupadi.app.core.AlertUi
 import com.draupadi.app.core.AppState
 import com.draupadi.app.core.Buzz
 import com.draupadi.app.core.Geo
 import com.draupadi.app.core.IncomingUi
+import com.draupadi.app.core.ResultUi
+import com.draupadi.app.core.ShakeDetector
 import com.draupadi.app.data.Prefs
+import com.draupadi.app.net.Cloud
+import com.draupadi.app.receiver.ActionReceiver
 import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationCallback
 import com.google.android.gms.location.LocationRequest
@@ -42,13 +50,10 @@ import com.google.android.gms.location.LocationResult
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.google.firebase.firestore.ListenerRegistration
-import com.draupadi.app.net.Cloud
-import com.draupadi.app.receiver.ActionReceiver
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.Locale
-import kotlin.math.sqrt
 
 /**
  * One service does everything.
@@ -59,17 +64,22 @@ import kotlin.math.sqrt
  * this service is already running in the foreground when the safe word is
  * heard, it is allowed to pick up the camera immediately.
  */
-class GuardianService : LifecycleService(), SensorEventListener {
+class GuardianService : LifecycleService() {
 
     private lateinit var prefs: Prefs
 
     private var recognizer: SpeechRecognizer? = null
+    private var wantListening = false
+    private var consecutiveErrors = 0
+
     private var recorder: EvidenceRecorder? = null
     private var fused: FusedLocationProviderClient? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var sensors: SensorManager? = null
+    private var shake: ShakeDetector? = null
 
     private val main = Handler(Looper.getMainLooper())
+    private val restartListening = Runnable { beginRecognition() }
 
     private var lastLocation: Location? = null
     private var alertId: String = ""
@@ -79,10 +89,6 @@ class GuardianService : LifecycleService(), SensorEventListener {
     private var preciseReg: ListenerRegistration? = null
     private var incomingReg: ListenerRegistration? = null
     private var incomingId: String = ""
-
-    private var shakeHits = 0
-    private var lastShakeAt = 0L
-    private var restarting = false
 
     // ------------------------------------------------------------ lifecycle
 
@@ -103,14 +109,18 @@ class GuardianService : LifecycleService(), SensorEventListener {
         fused = LocationServices.getFusedLocationProviderClient(this)
         Cloud.init(this)
 
+        ContextCompat.registerReceiver(
+            this, smsResult, IntentFilter(Messenger.ACTION_SMS_SENT),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+
         lifecycleScope.launch {
             Cloud.ensureSignedIn()
             startInbox()
         }
 
         startLocation()
-        startShake()
-        startListening()
+        applySettings()
 
         AppState.guardianRunning.value = true
     }
@@ -120,11 +130,14 @@ class GuardianService : LifecycleService(), SensorEventListener {
         when (intent?.action) {
             ACTION_SOS -> triggerAlert(
                 intent.getStringExtra(EXTRA_TRIGGER) ?: "button",
-                intent.getBooleanExtra(EXTRA_SILENT, prefs.silentOn)
+                intent.getBooleanExtra(EXTRA_SILENT, prefs.silentOn),
+                intent.getBooleanExtra(EXTRA_DRY, false)
             )
-            ACTION_SAFE -> endAlert(markedSafe = true)
+            ACTION_SAFE -> endAlert(markedSafe = true, cancelled = false)
+            ACTION_CANCEL -> endAlert(markedSafe = false, cancelled = true)
             ACTION_ACCEPT -> acceptIncoming()
             ACTION_DISMISS -> dismissIncoming()
+            ACTION_REFRESH -> applySettings()
             ACTION_STOP -> {
                 stopSelf()
                 return START_NOT_STICKY
@@ -135,8 +148,8 @@ class GuardianService : LifecycleService(), SensorEventListener {
 
     override fun onDestroy() {
         AppState.guardianRunning.value = false
-        AppState.listening.value = false
         stopListening()
+        stopShake()
         alertJob?.cancel()
         alertReg?.remove(); inboxReg?.remove(); preciseReg?.remove(); incomingReg?.remove()
         recorder?.release()
@@ -144,13 +157,30 @@ class GuardianService : LifecycleService(), SensorEventListener {
             fused?.removeLocationUpdates(locationCallback)
         } catch (_: Throwable) {
         }
-        sensors?.unregisterListener(this)
+        try {
+            unregisterReceiver(smsResult)
+        } catch (_: Throwable) {
+        }
         try {
             wakeLock?.release()
         } catch (_: Throwable) {
         }
         Buzz.stop(this)
+        Alarm.stopSiren()
         super.onDestroy()
+    }
+
+    /** Re-reads every toggle. Called on start and whenever settings change,
+     *  so the switches take effect immediately instead of after a reboot. */
+    private fun applySettings() {
+        if (prefs.guardianOn && prefs.voiceOn) startListening() else stopListening()
+        if (prefs.guardianOn && prefs.shakeOn) startShake() else stopShake()
+        if (prefs.guardianOn && prefs.respondOn) {
+            lifecycleScope.launch { startInbox() }
+        } else {
+            inboxReg?.remove(); inboxReg = null
+        }
+        goForeground()
     }
 
     // --------------------------------------------------------- notification
@@ -171,22 +201,62 @@ class GuardianService : LifecycleService(), SensorEventListener {
         )
     }
 
-    private fun openApp(): PendingIntent = PendingIntent.getActivity(
-        this, 0,
-        Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+    private fun openApp(requestCode: Int): PendingIntent = PendingIntent.getActivity(
+        this, requestCode,
+        Intent(this, MainActivity::class.java).addFlags(
+            Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                Intent.FLAG_ACTIVITY_SINGLE_TOP
+        ),
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
     )
 
-    private fun guardianNotification(text: String) =
-        NotificationCompat.Builder(this, CH_GUARD)
+    private fun action(name: String, code: Int): PendingIntent = PendingIntent.getBroadcast(
+        this, code,
+        Intent(this, ActionReceiver::class.java).setAction(name),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    )
+
+    private fun idleNotification(): Notification {
+        val text = when {
+            !prefs.guardianOn -> "Guardian is off"
+            prefs.voiceOn -> "Listening for “${prefs.safeWord}”"
+            else -> "Ready — hold the button or shake the phone"
+        }
+        return NotificationCompat.Builder(this, CH_GUARD)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle("Draupadi")
             .setContentText(text)
             .setOngoing(true)
             .setSilent(true)
+            .setOnlyAlertOnce(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setContentIntent(openApp())
+            .setContentIntent(openApp(1))
             .build()
+    }
+
+    /** During an alert the ongoing notification becomes the receipt: it names
+     *  exactly how many texts got out, and taps straight back to the screen. */
+    private fun alertNotification(): Notification {
+        val a = AppState.alert.value
+        val title = if (a.dryRun) "TEST alert — nothing was sent" else "SOS ACTIVE"
+        val body = buildString {
+            append("${a.smsSent}/${a.smsTotal} texts sent")
+            if (a.recording) append(" · recording")
+            if (a.reached > 0) append(" · ${a.reached} phones alerted")
+        }
+        return NotificationCompat.Builder(this, CH_ALERT)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle(title)
+            .setContentText(body)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setCategory(NotificationCompat.CATEGORY_ALARM)
+            .setFullScreenIntent(openApp(2), true)
+            .setContentIntent(openApp(2))
+            .addAction(0, "I am safe", action(ACTION_SAFE, 21))
+            .build()
+    }
 
     private fun serviceTypes(includeCamera: Boolean): Int {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return 0
@@ -197,9 +267,14 @@ class GuardianService : LifecycleService(), SensorEventListener {
         return t
     }
 
-    private fun goForeground(text: String = "Listening for your safe word", camera: Boolean = false) {
+    private fun goForeground() {
+        val active = AppState.alert.value.active
         try {
-            ServiceCompat.startForeground(this, NOTE_ID, guardianNotification(text), serviceTypes(camera))
+            ServiceCompat.startForeground(
+                this, NOTE_ID,
+                if (active) alertNotification() else idleNotification(),
+                serviceTypes(active)
+            )
         } catch (t: Throwable) {
             Log.e(TAG, "startForeground failed: ${t.message}")
         }
@@ -208,19 +283,36 @@ class GuardianService : LifecycleService(), SensorEventListener {
     private fun has(p: String) =
         ContextCompat.checkSelfPermission(this, p) == PackageManager.PERMISSION_GRANTED
 
-    // ------------------------------------------------------ the safe word
+    // ------------------------------------------------------- the safe word
 
+    /**
+     * Android's recogniser stops after every utterance and after every silence
+     * timeout, so an always-on keyword loop means restarting it constantly.
+     * The old version destroyed and rebuilt the whole recogniser each round,
+     * which is why the status indicator flickered on and off. Now one instance
+     * is kept alive and simply restarted, and the "listening" flag stays
+     * steady for as long as the loop is running.
+     */
     private fun startListening() {
-        if (!prefs.guardianOn || !prefs.voiceOn) return
-        if (!has(Manifest.permission.RECORD_AUDIO)) return
+        if (!has(Manifest.permission.RECORD_AUDIO)) {
+            AppState.listening.value = false
+            return
+        }
         if (AppState.alert.value.active) return
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
             Log.w(TAG, "no speech recognition on this device")
+            AppState.listening.value = false
             return
         }
-        main.post {
-            try {
-                stopListening()
+        wantListening = true
+        AppState.listening.value = true
+        main.post { beginRecognition() }
+    }
+
+    private fun beginRecognition() {
+        if (!wantListening || AppState.alert.value.active) return
+        try {
+            if (recognizer == null) {
                 val r = if (Build.VERSION.SDK_INT >= 33 &&
                     SpeechRecognizer.isOnDeviceRecognitionAvailable(this)
                 ) {
@@ -229,14 +321,13 @@ class GuardianService : LifecycleService(), SensorEventListener {
                     SpeechRecognizer.createSpeechRecognizer(this)
                 }
                 r.setRecognitionListener(listener)
-                r.startListening(recognizerIntent())
                 recognizer = r
-                AppState.listening.value = true
-            } catch (t: Throwable) {
-                Log.w(TAG, "recognizer failed: ${t.message}")
-                AppState.listening.value = false
-                scheduleRestart(4000)
             }
+            recognizer?.startListening(recognizerIntent())
+        } catch (t: Throwable) {
+            Log.w(TAG, "recogniser failed: ${t.message}")
+            rebuildRecognizer()
+            scheduleRestart(2000)
         }
     }
 
@@ -246,50 +337,80 @@ class GuardianService : LifecycleService(), SensorEventListener {
         putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toString())
         putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
         putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
+        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 4000L)
+        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 4000L)
         if (Build.VERSION.SDK_INT >= 33) {
             putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
         }
     }
 
-    private fun stopListening() {
-        AppState.listening.value = false
-        val r = recognizer ?: return
+    private fun scheduleRestart(ms: Long) {
+        main.removeCallbacks(restartListening)
+        main.postDelayed(restartListening, ms)
+    }
+
+    private fun rebuildRecognizer() {
+        val r = recognizer
         recognizer = null
         main.post {
             try {
-                r.stopListening(); r.cancel(); r.destroy()
+                r?.cancel(); r?.destroy()
             } catch (_: Throwable) {
             }
         }
     }
 
-    private fun scheduleRestart(ms: Long) {
-        if (restarting) return
-        restarting = true
-        main.postDelayed({
-            restarting = false
-            if (!AppState.alert.value.active) startListening()
-        }, ms)
+    private fun stopListening() {
+        wantListening = false
+        AppState.listening.value = false
+        AppState.micLevel.value = 0f
+        main.removeCallbacks(restartListening)
+        rebuildRecognizer()
     }
 
     private val listener = object : RecognitionListener {
-        override fun onReadyForSpeech(params: Bundle?) {}
+        override fun onReadyForSpeech(params: Bundle?) {
+            consecutiveErrors = 0
+        }
+
         override fun onBeginningOfSpeech() {}
-        override fun onRmsChanged(rmsdB: Float) {}
         override fun onBufferReceived(buffer: ByteArray?) {}
         override fun onEndOfSpeech() {}
         override fun onEvent(eventType: Int, params: Bundle?) {}
 
+        /** Drives the live level bar on the home screen — visible proof that
+         *  the microphone really is open. */
+        override fun onRmsChanged(rmsdB: Float) {
+            AppState.micLevel.value = ((rmsdB + 2f) / 11f).coerceIn(0f, 1f)
+        }
+
         override fun onError(error: Int) {
-            AppState.listening.value = false
-            // NO_MATCH and SPEECH_TIMEOUT are normal in a quiet room
-            scheduleRestart(if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) 2500 else 900)
+            AppState.micLevel.value = 0f
+            when (error) {
+                SpeechRecognizer.ERROR_NO_MATCH,
+                SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
+                    // completely normal in a quiet room — go straight round again
+                    consecutiveErrors = 0
+                    scheduleRestart(200)
+                }
+                SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> scheduleRestart(1200)
+                SpeechRecognizer.ERROR_CLIENT -> {
+                    rebuildRecognizer()
+                    scheduleRestart(900)
+                }
+                else -> {
+                    consecutiveErrors++
+                    if (consecutiveErrors > 8) rebuildRecognizer()
+                    scheduleRestart(if (consecutiveErrors > 4) 5000 else 1000)
+                }
+            }
         }
 
         override fun onPartialResults(partialResults: Bundle?) = check(partialResults)
+
         override fun onResults(results: Bundle?) {
             check(results)
-            scheduleRestart(500)
+            scheduleRestart(200)
         }
 
         private fun check(bundle: Bundle?) {
@@ -298,7 +419,7 @@ class GuardianService : LifecycleService(), SensorEventListener {
             if (heard.isNotBlank()) AppState.heard.value = heard
             val word = prefs.safeWord.lowercase(Locale.getDefault())
             if (word.isNotBlank() && heard.contains(word)) {
-                triggerAlert("voice", prefs.silentOn)
+                triggerAlert("voice", prefs.silentOn, false)
             }
         }
     }
@@ -306,35 +427,34 @@ class GuardianService : LifecycleService(), SensorEventListener {
     // ------------------------------------------------------------- shaking
 
     private fun startShake() {
-        if (!prefs.shakeOn) return
+        if (shake != null) return
         sensors = getSystemService(Context.SENSOR_SERVICE) as? SensorManager
-        val accel = sensors?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) ?: return
-        sensors?.registerListener(this, accel, SensorManager.SENSOR_DELAY_UI)
-    }
-
-    override fun onSensorChanged(event: SensorEvent?) {
-        if (event == null || event.sensor.type != Sensor.TYPE_ACCELEROMETER) return
-        if (AppState.alert.value.active) return
-        val g = sqrt(
-            (event.values[0] * event.values[0] +
-                event.values[1] * event.values[1] +
-                event.values[2] * event.values[2]).toDouble()
-        )
-        val now = System.currentTimeMillis()
-        if (g > 26) {
-            if (now - lastShakeAt > 3000) shakeHits = 0
-            if (now - lastShakeAt > 180) {
-                shakeHits++
-                lastShakeAt = now
-            }
-            if (shakeHits >= 4) {
-                shakeHits = 0
-                triggerAlert("shake", prefs.silentOn)
-            }
+        val accel = sensors?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) ?: run {
+            Log.w(TAG, "no accelerometer")
+            return
         }
+        val d = ShakeDetector {
+            AppState.shakeDetected.value = System.currentTimeMillis()
+            if (!AppState.alert.value.active) triggerAlert("shake", prefs.silentOn, false)
+        }
+        shake = d
+        sensors?.registerListener(d, accel, SensorManager.SENSOR_DELAY_GAME)
+
+        // keep the meter fed for the self-test screen
+        main.post(object : Runnable {
+            override fun run() {
+                val s = shake ?: return
+                AppState.shakeLevel.value = s.level
+                main.postDelayed(this, 90)
+            }
+        })
     }
 
-    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+    private fun stopShake() {
+        shake?.let { sensors?.unregisterListener(it) }
+        shake = null
+        AppState.shakeLevel.value = 0f
+    }
 
     // ------------------------------------------------------------ location
 
@@ -344,8 +464,10 @@ class GuardianService : LifecycleService(), SensorEventListener {
             lastLocation = loc
             if (AppState.alert.value.active) {
                 AppState.alert.value = AppState.alert.value.copy(locationFixed = true)
-                lifecycleScope.launch {
-                    Cloud.pushPrecise(alertId, loc.latitude, loc.longitude, loc.accuracy)
+                if (!AppState.alert.value.dryRun) {
+                    lifecycleScope.launch {
+                        Cloud.pushPrecise(alertId, loc.latitude, loc.longitude, loc.accuracy)
+                    }
                 }
             } else {
                 lifecycleScope.launch { Cloud.heartbeat(loc.latitude, loc.longitude, prefs.name) }
@@ -379,44 +501,94 @@ class GuardianService : LifecycleService(), SensorEventListener {
         }
     }
 
+    // ---------------------------------------------------------- sms result
+
+    /** Real delivery counts, so the screen can say "3 of 4 sent" honestly. */
+    private val smsResult = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val a = AppState.alert.value
+            if (!a.active) return
+            AppState.alert.value = if (resultCode == Activity.RESULT_OK) {
+                a.copy(smsSent = a.smsSent + 1)
+            } else {
+                a.copy(smsFailed = a.smsFailed + 1)
+            }
+            goForeground()
+        }
+    }
+
     // --------------------------------------------------------------- alert
 
-    private fun triggerAlert(trigger: String, silent: Boolean) {
+    private fun triggerAlert(trigger: String, silent: Boolean, dryRun: Boolean) {
         if (AppState.alert.value.active) return
 
         stopListening()
+        AppState.result.value = ResultUi()
+
+        val numbers = Messenger.numbersOf(prefs.contacts, prefs.policeNumber)
         AppState.alert.value = AlertUi(
-            active = true, seconds = 0, trigger = trigger, silent = silent,
-            note = "Sending"
+            active = true, seconds = 0, trigger = trigger, silent = silent, dryRun = dryRun,
+            smsTotal = if (dryRun) 0 else numbers.size,
+            cancelSecs = CANCEL_WINDOW,
+            note = if (dryRun) "Test" else "Sending"
         )
-        goForeground("SOS active — recording and alerting", camera = true)
+
+        // make it unmistakable that it fired
         Buzz.once(this, if (silent) Buzz.QUIET else Buzz.SOS)
+        if (!silent) Alarm.confirm(prefs.loudSiren)
+        if (!silent && prefs.loudSiren) Alarm.siren(this)
+
+        goForeground()
+        showAlertScreen()
         sharpenLocation()
 
-        // 1. the text goes first. It is the only channel that needs nothing
-        //    from the other side: no app, no data, no account.
-        val loc = lastLocation
-        val link = if (loc != null) Geo.mapsLink(loc.latitude, loc.longitude) else "acquiring GPS…"
-        val numbers = Messenger.numbersOf(prefs.contacts, prefs.policeNumber)
-        val sent = Messenger.sendTo(this, numbers, Messenger.alertText(prefs.name, link, true))
-        AppState.alert.value = AppState.alert.value.copy(smsSent = sent, note = "Recording")
+        // 1. the text goes first — the only channel that needs nothing from
+        //    the other side: no app, no data, no account
+        if (!dryRun) {
+            val loc = lastLocation
+            val link = if (loc != null) Geo.mapsLink(loc.latitude, loc.longitude)
+            else "GPS still locking on"
+            val handed = Messenger.sendTo(this, numbers, Messenger.alertText(prefs.name, link), tracked = true)
+            AppState.alert.value = AppState.alert.value.copy(
+                smsTotal = numbers.size,
+                note = if (handed == 0) "Could not send texts" else "Recording"
+            )
+        }
 
         // 2. the camera
-        recorder = EvidenceRecorder(this, this).also { rec ->
-            rec.start(useFrontCamera = false) { uri -> onRecordingSaved(uri) }
+        if (prefs.autoRecord) {
+            recorder = EvidenceRecorder(this, this).also { rec ->
+                rec.start(useFrontCamera = false) { uri -> onRecordingSaved(uri) }
+            }
+            AppState.alert.value = AppState.alert.value.copy(recording = true)
         }
-        AppState.alert.value = AppState.alert.value.copy(recording = true)
 
         // 3. the neighbourhood
-        alertJob = lifecycleScope.launch { runAlert(trigger) }
+        alertJob = lifecycleScope.launch { runAlert(trigger, dryRun) }
     }
 
-    private suspend fun runAlert(trigger: String) {
+    /** Brings the red screen up even from a locked, dark phone. */
+    private fun showAlertScreen() {
+        try {
+            startActivity(
+                Intent(this, MainActivity::class.java).addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                        Intent.FLAG_ACTIVITY_SINGLE_TOP
+                )
+            )
+        } catch (t: Throwable) {
+            // Android blocks background activity starts; the full-screen
+            // notification posted alongside is the sanctioned fallback
+            Log.w(TAG, "could not open the screen directly: ${t.message}")
+        }
+    }
+
+    private suspend fun runAlert(trigger: String, dryRun: Boolean) {
         val loc = lastLocation
         var lat = loc?.latitude ?: 0.0
         var lng = loc?.longitude ?: 0.0
 
-        if (Cloud.enabled && loc != null) {
+        if (!dryRun && Cloud.enabled && loc != null) {
             Cloud.ensureSignedIn()
             val id = Cloud.createAlert(prefs.name, lat, lng, trigger)
             if (id != null) {
@@ -441,11 +613,16 @@ class GuardianService : LifecycleService(), SensorEventListener {
         while (AppState.alert.value.active) {
             delay(1000)
             seconds++
-            AppState.alert.value = AppState.alert.value.copy(seconds = seconds)
+            val now = AppState.alert.value
+            AppState.alert.value = now.copy(
+                seconds = seconds,
+                cancelSecs = if (now.cancelSecs > 0) now.cancelSecs - 1 else 0
+            )
 
-            if (seconds % 5 == 0) goForeground("SOS active · ${seconds}s — recording", camera = true)
+            if (seconds % 5 == 0) goForeground()
 
             lastLocation?.let { lat = it.latitude; lng = it.longitude }
+            if (dryRun) continue
 
             // a still every 8 seconds, so evidence exists in the cloud even if
             // the phone does not survive long enough to finish the video
@@ -470,69 +647,84 @@ class GuardianService : LifecycleService(), SensorEventListener {
             }
 
             // a fresh location by text every two minutes, three times over
-            if (seconds > 0 && seconds % 120 == 0 && smsUpdates < 3 && lastLocation != null) {
+            if (seconds % 120 == 0 && smsUpdates < 3 && lastLocation != null) {
                 smsUpdates++
                 Messenger.sendTo(
                     this@GuardianService,
                     Messenger.numbersOf(prefs.contacts, prefs.policeNumber),
-                    Messenger.alertText(prefs.name, Geo.mapsLink(lat, lng), false)
+                    Messenger.updateText(prefs.name, Geo.mapsLink(lat, lng))
                 )
             }
         }
     }
 
-    private fun endAlert(markedSafe: Boolean) {
-        if (!AppState.alert.value.active) return
+    private fun endAlert(markedSafe: Boolean, cancelled: Boolean) {
         val was = AppState.alert.value
+        if (!was.active) return
+
         AppState.alert.value = was.copy(active = false, note = "Saving")
         alertJob?.cancel()
         alertReg?.remove(); alertReg = null
         Buzz.stop(this)
+        Alarm.stopSiren()
         Buzz.once(this, Buzz.CONFIRM)
 
         recorder?.stop()
 
-        if (markedSafe) {
-            Messenger.sendTo(
-                this,
-                Messenger.numbersOf(prefs.contacts, prefs.policeNumber),
-                Messenger.safeText(prefs.name)
-            )
+        if (!was.dryRun) {
+            val numbers = Messenger.numbersOf(prefs.contacts, prefs.policeNumber)
+            if (cancelled) {
+                Messenger.sendTo(this, numbers, Messenger.falseAlarmText(prefs.name))
+            } else if (markedSafe) {
+                Messenger.sendTo(this, numbers, Messenger.safeText(prefs.name))
+            }
         }
+
         val id = alertId
         alertId = ""
-        lifecycleScope.launch { if (id.isNotEmpty()) Cloud.closeAlert(id) }
+        if (!was.dryRun) lifecycleScope.launch { if (id.isNotEmpty()) Cloud.closeAlert(id) }
+
+        AppState.result.value = ResultUi(
+            show = true,
+            cancelled = cancelled,
+            dryRun = was.dryRun,
+            seconds = was.seconds,
+            smsSent = was.smsSent,
+            smsTotal = was.smsTotal,
+            reached = was.reached,
+            savedVideo = was.savedVideo
+        )
 
         goForeground()
         startLocation()
-        main.postDelayed({ startListening() }, 1500)
+        main.postDelayed({ applySettings() }, 1500)
     }
 
     /** The clip is already in the Gallery by the time this runs. */
-    private fun onRecordingSaved(uri: android.net.Uri?) {
-        AppState.alert.value = AppState.alert.value.copy(
+    private fun onRecordingSaved(uri: Uri?) {
+        val a = AppState.alert.value
+        AppState.alert.value = a.copy(
             recording = false,
             savedVideo = uri?.toString(),
             note = if (uri != null) "Saved to Gallery" else "Recording failed"
         )
-        if (uri == null) return
+        AppState.result.value = AppState.result.value.copy(savedVideo = uri?.toString())
+        if (uri == null || a.dryRun) return
 
         lifecycleScope.launch {
             val link = if (alertId.isNotEmpty()) Cloud.uploadVideo(alertId, uri) else null
-            // The clip itself cannot travel by SMS, but a link to it can — and
-            // that needs no tap from someone who has just been through this.
             if (link != null) {
                 Messenger.sendTo(
                     this@GuardianService,
                     Messenger.numbersOf(prefs.contacts, prefs.policeNumber),
-                    "Draupadi recording from ${prefs.name.ifBlank { "the alert" }}: $link"
+                    "Draupadi recording: $link"
                 )
             }
             notifyVideoReady(uri, link)
         }
     }
 
-    private fun notifyVideoReady(uri: android.net.Uri, cloudLink: String?) {
+    private fun notifyVideoReady(uri: Uri, cloudLink: String?) {
         val caption = buildString {
             append("Draupadi recording from my SOS.")
             lastLocation?.let { append(" Location: ${Geo.mapsLink(it.latitude, it.longitude)}") }
@@ -545,12 +737,13 @@ class GuardianService : LifecycleService(), SensorEventListener {
             .setContentTitle("Recording saved to your Gallery")
             .setContentText("Tap to send it to your people on WhatsApp")
             .setAutoCancel(true)
+            .setOnlyAlertOnce(true)
             .setContentIntent(Messenger.pending(this, send, 42))
             .build()
         nm.notify(NOTE_VIDEO, note)
     }
 
-    // ----------------------------------------------------- being a neighbour
+    // ---------------------------------------------------- being a neighbour
 
     private fun startInbox() {
         if (!prefs.respondOn) return
@@ -579,26 +772,15 @@ class GuardianService : LifecycleService(), SensorEventListener {
 
     private fun notifyIncoming(fromName: String, distanceM: Int) {
         val nm = getSystemService(NotificationManager::class.java) ?: return
-        val open = PendingIntent.getActivity(
-            this, 7,
-            Intent(this, MainActivity::class.java)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        val accept = PendingIntent.getBroadcast(
-            this, 8,
-            Intent(this, ActionReceiver::class.java).setAction(ACTION_ACCEPT),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
         val note = NotificationCompat.Builder(this, CH_ALERT)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle("Someone ${Geo.pretty(distanceM.toDouble())} away needs help")
             .setContentText("$fromName triggered an SOS. Only accept if you can actually go.")
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_ALARM)
-            .setFullScreenIntent(open, true)
-            .setContentIntent(open)
-            .addAction(0, "I can help", accept)
+            .setFullScreenIntent(openApp(7), true)
+            .setContentIntent(openApp(7))
+            .addAction(0, "I can help", action(ACTION_ACCEPT, 8))
             .setAutoCancel(true)
             .build()
         nm.notify(NOTE_INCOMING, note)
@@ -614,7 +796,8 @@ class GuardianService : LifecycleService(), SensorEventListener {
             Cloud.accept(id)
             preciseReg?.remove()
             preciseReg = Cloud.watchPrecise(id) { lat, lng ->
-                AppState.incoming.value = AppState.incoming.value.copy(lat = lat, lng = lng, unlocked = true)
+                AppState.incoming.value =
+                    AppState.incoming.value.copy(lat = lat, lng = lng, unlocked = true)
             }
         }
     }
@@ -638,18 +821,31 @@ class GuardianService : LifecycleService(), SensorEventListener {
         private const val NOTE_INCOMING = 2
         private const val NOTE_VIDEO = 3
 
+        /** How long a fresh alert can still be called a false alarm. */
+        const val CANCEL_WINDOW = 10
+
         const val ACTION_SOS = "com.draupadi.app.SOS"
         const val ACTION_SAFE = "com.draupadi.app.SAFE"
+        const val ACTION_CANCEL = "com.draupadi.app.CANCEL"
         const val ACTION_ACCEPT = "com.draupadi.app.ACCEPT"
         const val ACTION_DISMISS = "com.draupadi.app.DISMISS"
+        const val ACTION_REFRESH = "com.draupadi.app.REFRESH"
         const val ACTION_STOP = "com.draupadi.app.STOP"
         const val EXTRA_TRIGGER = "trigger"
         const val EXTRA_SILENT = "silent"
+        const val EXTRA_DRY = "dry"
 
-        fun send(context: Context, action: String, trigger: String = "button", silent: Boolean = false) {
+        fun send(
+            context: Context,
+            action: String,
+            trigger: String = "button",
+            silent: Boolean = false,
+            dryRun: Boolean = false
+        ) {
             val i = Intent(context, GuardianService::class.java).setAction(action)
                 .putExtra(EXTRA_TRIGGER, trigger)
                 .putExtra(EXTRA_SILENT, silent)
+                .putExtra(EXTRA_DRY, dryRun)
             try {
                 ContextCompat.startForegroundService(context, i)
             } catch (t: Throwable) {

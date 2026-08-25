@@ -16,14 +16,19 @@ import com.draupadi.app.data.Contact
  * Getting the message out.
  *
  * SMS is the only channel that works with no data, no app on the other end and
- * no account — so that is what carries the location. It is sent with no
- * confirmation dialog and no tap: permission is granted once during setup, and
- * never asked for again. Someone being followed should not have to answer a
- * system prompt.
+ * no account — so that is what carries the location. It goes out with no
+ * confirmation dialog and no tap: the permission is granted once during setup
+ * and never asked for again.
+ *
+ * Every message is sent with a result callback, so the app can say "3 of 4
+ * delivered" rather than crossing its fingers.
  */
 object Messenger {
 
     private const val TAG = "Draupadi/Msg"
+
+    const val ACTION_SMS_SENT = "com.draupadi.app.SMS_SENT"
+    const val EXTRA_TO = "to"
 
     private fun sms(context: Context): SmsManager? = try {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -41,44 +46,71 @@ object Messenger {
         ContextCompat.checkSelfPermission(context, Manifest.permission.SEND_SMS) ==
             PackageManager.PERMISSION_GRANTED
 
-    /** @return how many messages actually went out */
-    fun sendTo(context: Context, numbers: List<String>, text: String): Int {
+    /**
+     * @param tracked when true each message carries a result PendingIntent that
+     *                broadcasts [ACTION_SMS_SENT] back to the service
+     * @return how many messages were handed to the radio
+     */
+    fun sendTo(
+        context: Context,
+        numbers: List<String>,
+        text: String,
+        tracked: Boolean = false
+    ): Int {
         if (!canSendSms(context)) {
             Log.w(TAG, "SEND_SMS not granted")
             return 0
         }
         val m = sms(context) ?: return 0
-        var sent = 0
-        numbers.filter { it.isNotBlank() }.forEach { number ->
+        var handed = 0
+        numbers.filter { it.isNotBlank() }.forEachIndexed { index, number ->
             try {
                 val parts = m.divideMessage(text)
                 if (parts.size <= 1) {
-                    m.sendTextMessage(number, null, text, null, null)
+                    val pi = if (tracked) sentIntent(context, index, number) else null
+                    m.sendTextMessage(number, null, text, pi, null)
                 } else {
+                    // long messages cannot be tracked part-by-part without
+                    // over-counting, so they are sent plainly
                     m.sendMultipartTextMessage(number, null, parts, null, null)
                 }
-                sent++
+                handed++
             } catch (t: Throwable) {
                 Log.w(TAG, "sms to $number failed: ${t.message}")
             }
         }
-        return sent
+        return handed
     }
 
-    fun alertText(name: String, mapsLink: String, first: Boolean): String {
+    private fun sentIntent(context: Context, index: Int, number: String): PendingIntent =
+        PendingIntent.getBroadcast(
+            context,
+            9000 + index,
+            Intent(ACTION_SMS_SENT)
+                .setPackage(context.packageName)
+                .putExtra(EXTRA_TO, number),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+    /** Deliberately under 160 characters so it is one SMS, one result, no ambiguity. */
+    fun alertText(name: String, mapsLink: String): String {
         val who = if (name.isBlank()) "Someone" else name
-        return if (first) {
-            "EMERGENCY. $who has triggered an SOS and may be in danger. " +
-                "Live location: $mapsLink . Please call her and reach her now. " +
-                "Sent automatically by Draupadi."
-        } else {
-            "$who is still in danger. Updated location: $mapsLink"
-        }
+        return "SOS: $who may be in danger and needs help now. Location: $mapsLink (sent by Draupadi)"
+    }
+
+    fun updateText(name: String, mapsLink: String): String {
+        val who = if (name.isBlank()) "She" else name
+        return "$who is still in danger. Updated location: $mapsLink"
     }
 
     fun safeText(name: String): String {
         val who = if (name.isBlank()) "She" else name
         return "$who has marked herself safe. The Draupadi alert is closed."
+    }
+
+    fun falseAlarmText(name: String): String {
+        val who = if (name.isBlank()) "She" else name
+        return "False alarm — $who cancelled the Draupadi alert. She is fine."
     }
 
     /**
@@ -107,7 +139,6 @@ object Messenger {
         }
     }
 
-    /** Falls back to the system share sheet when WhatsApp is not installed. */
     fun shareIntent(video: Uri, caption: String): Intent =
         Intent.createChooser(
             Intent(Intent.ACTION_SEND).apply {

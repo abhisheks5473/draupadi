@@ -262,3 +262,24 @@ fun SpacedColumn(content: @Composable () -> Unit) {
 /** A tap target for plain text, without dragging in the ripple machinery. */
 fun Modifier.clickableText(onClick: () -> Unit): Modifier =
     this.then(Modifier.pointerInput(Unit) { detectTapGestures(onTap = { onClick() }) })
+
+/** A live 0..1 meter. Used to prove the microphone and the accelerometer are
+ *  actually alive, rather than asking anyone to take it on trust. */
+@Composable
+fun LevelBar(level: Float, tint: Color, height: Dp = 6.dp) {
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .height(height)
+            .clip(RoundedCornerShape(height / 2))
+            .background(Color.White.copy(alpha = 0.08f))
+    ) {
+        Box(
+            Modifier
+                .fillMaxWidth(level.coerceIn(0f, 1f))
+                .height(height)
+                .clip(RoundedCornerShape(height / 2))
+                .background(tint)
+        )
+    }
+}

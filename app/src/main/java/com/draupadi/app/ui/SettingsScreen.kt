@@ -36,7 +36,17 @@ import com.draupadi.app.data.Contact
 import com.draupadi.app.data.Prefs
 
 @Composable
-fun SettingsScreen(prefs: Prefs, cloudStatus: String, onBack: () -> Unit, onChanged: () -> Unit) {
+fun SettingsScreen(
+    prefs: Prefs,
+    cloudStatus: String,
+    micLevel: Float,
+    shakeLevel: Float,
+    shakeFlash: Boolean,
+    heard: String,
+    onTestSos: () -> Unit,
+    onBack: () -> Unit,
+    onChanged: () -> Unit
+) {
     var word by remember { mutableStateOf(prefs.safeWord) }
     var police by remember { mutableStateOf(prefs.policeNumber) }
     var name by remember { mutableStateOf(prefs.name) }
@@ -46,6 +56,7 @@ fun SettingsScreen(prefs: Prefs, cloudStatus: String, onBack: () -> Unit, onChan
     var shake by remember { mutableStateOf(prefs.shakeOn) }
     var silent by remember { mutableStateOf(prefs.silentOn) }
     var respond by remember { mutableStateOf(prefs.respondOn) }
+    var siren by remember { mutableStateOf(prefs.loudSiren) }
     val context = LocalContext.current
 
     val picker = rememberLauncherForActivityResult(
@@ -133,9 +144,53 @@ fun SettingsScreen(prefs: Prefs, cloudStatus: String, onBack: () -> Unit, onChan
         Toggle("Silent alerts", "No siren, no bright screen. For a club or a cab", silent) {
             silent = it; prefs.silentOn = it
         }
+        Toggle("Loud siren", "Sounds the alarm tone during an alert. Off by default — it also drowns out the recording", siren) {
+            siren = it; prefs.loudSiren = it
+        }
         Toggle("Answer other people's alerts", "Your phone buzzes when someone nearby is in trouble", respond) {
             respond = it; prefs.respondOn = it; onChanged()
         }
+
+        Gap(26)
+        Label("check it works")
+        Gap(4)
+        Text(
+            "Both triggers are live right now. Watch the bars move — nothing here sends anything.",
+            color = Ink3, fontSize = 13.sp, lineHeight = 19.sp
+        )
+
+        Gap(16)
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("Microphone", color = Ink, fontSize = 14.5.sp, modifier = Modifier.weight(1f))
+            Text(if (voice && guardian) "listening" else "off", color = Ink3, fontSize = 12.5.sp)
+        }
+        Gap(6)
+        LevelBar(micLevel, Safe)
+        if (heard.isNotBlank()) {
+            Gap(6)
+            Text("heard: \u201C$heard\u201D", color = Ink3, fontSize = 12.sp, maxLines = 2)
+        }
+
+        Gap(18)
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("Shake", color = Ink, fontSize = 14.5.sp, modifier = Modifier.weight(1f))
+            Text(
+                if (shakeFlash) "detected" else if (shake && guardian) "shake the phone" else "off",
+                color = if (shakeFlash) Safe else Ink3,
+                fontSize = 12.5.sp,
+                fontWeight = if (shakeFlash) FontWeight.Bold else FontWeight.Normal
+            )
+        }
+        Gap(6)
+        LevelBar(shakeLevel, if (shakeFlash) Safe else Red)
+
+        Gap(18)
+        SoftButton("Run a test SOS (sends nothing)", tint = Ink) { onTestSos() }
+        Gap(6)
+        Text(
+            "Records, shows the alert screen and saves to your Gallery — but no texts, no contacts, no police.",
+            color = Ink3, fontSize = 12.5.sp, lineHeight = 18.sp
+        )
 
         Gap(26)
         Label("network")

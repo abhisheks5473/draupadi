@@ -6,7 +6,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -27,14 +26,17 @@ import androidx.compose.ui.unit.sp
 /**
  * Home is one button and one sentence.
  *
- * Everything else — contacts, the safe word, the toggles — lives behind the
- * dot in the corner. Under real fear, choice is the enemy.
+ * The thin bar under the status line moves with the microphone. It is there so
+ * "is it actually listening?" never has to be a matter of faith — the old
+ * indicator flickered on and off because the recogniser restarts constantly
+ * under the hood, which looked like a fault when it was not one.
  */
 @Composable
 fun HomeScreen(
     safeWord: String,
     listening: Boolean,
     guardianOn: Boolean,
+    micLevel: Float,
     onSos: () -> Unit,
     onSettings: () -> Unit
 ) {
@@ -78,15 +80,13 @@ fun HomeScreen(
             }
         }
 
+        if (guardianOn && listening) {
+            Gap(10)
+            LevelBar(micLevel, Safe.copy(alpha = 0.85f))
+        }
+
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                HoldCircle(
-                    label = "HOLD",
-                    sub = "for help",
-                    tint = Red,
-                    onComplete = onSos
-                )
-            }
+            HoldCircle(label = "HOLD", sub = "for help", tint = Red, onComplete = onSos)
         }
 
         Column(
@@ -99,11 +99,10 @@ fun HomeScreen(
                 color = Ink3, fontSize = 14.sp, textAlign = TextAlign.Center
             )
             Text(
-                "or shake the phone hard",
+                "or shake the phone hard for a second",
                 color = Ink3, fontSize = 14.sp, textAlign = TextAlign.Center
             )
         }
-        Spacer(Modifier.size(0.dp))
     }
 }
 
